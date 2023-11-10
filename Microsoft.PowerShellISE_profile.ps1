@@ -451,24 +451,25 @@ Param(
 )
 $Script_Title = "Find-ADUser"
 $Script_Author="Nathan Anderson"
-$Script_Version="1.0"
+$Script_Version="1.1"
 <#-----------------------------------------------------------------------------
-Syntax: Find-User <Partial displayname>
+Syntax: Find-User <Partial displayname or user id>
     
 Purpose: Find AD user from partial search
      
 Version Info:
-    1.0 9/18/2023 First!
-    Next: List computers they use (via SCCM?)
+    1.0 9/18/2023 First!3
+    1.1 11/7/2023 Added username to search. Improved output to object and reduced data gathered.
+    Next: 
         Allow array input (more than one lookup at a time)?
-        Add samaccountname search
-        Anixis enrollment?
 	
 -----------------------------------------------------------------------------#>
 $User = "*" + $User + "*"
-$a = get-aduser -filter {displayname -like $User} -Properties *
-return $a
-}
+$a = @(get-aduser -filter {displayname -like $User})
+$a += @(get-aduser -filter {name -like $User})
+$a = $a|Sort-Object -Unique
+return $a | Select-Object Enabled,GivenName,Surname,Name,UserPrincipalName
+} # End Function
 #################################################################################################
 function Count-Down {
     [alias("Wait")]
@@ -481,19 +482,46 @@ function Count-Down {
     )
 $Script_Title = "Count-Down"
 $Script_Author="Nathan Anderson"
-$Script_Version="1.0"
+$Script_Version="1.1"
 <#-----------------------------------------------------------------------------
 Purpose:
     to Count-Down -Seconds with a progress bar.
 
 Version Info:
     1.0 7/4/2023 First try
-    Add an inturrupt so the countdown will stop when it is pressed.
+    1.1 11/6/2023 Added human inturrupt w/ Esc key. (Not available for ISE shells). Added blank lines to allow room for progress bars.
 	
 -----------------------------------------------------------------------------#>
+# Add blank lines to make room for progress bars.
+Write-Host `n`n`n`n`n`n`n`n
 For ($i=$Seconds; $i -gt 0; $i--) {
-	Write-Progress -Activity $Script_Title -Status $i -PercentComplete ($i / ($Seconds) * 100)
-    sleep 1
+
+    # Update the progress bar
+	If ($psISE) {
+        Write-Progress -Activity $Script_Title -Status $i -PercentComplete ($i / ($Seconds) * 100)
+    } Else {
+        Write-Progress -Activity $Script_Title -Status $i -PercentComplete ($i / ($Seconds) * 100) -CurrentOperation "Press Esc to inturrupt."
+    }
+
+    # Non-blocking key detection does not work in ISE shell. (Alt method: $Host.Name)
+    If (!($psISE)) {
+        
+        # Break if Esc key pressed.
+        While ([Console]::KeyAvailable) {
+            $keyInfo = [Console]::ReadKey($true)
+            If ($keyInfo.Key -eq [ConsoleKey]::Escape) {
+                
+                # Flush the read buffer in case of rapid key submission to prevent additional keys being sent to parent scope.
+                While ([Console]::KeyAvailable) {
+                    [Console]::ReadKey($true)
+                }
+
+                Write-Progress -Activity $Script_Title -Completed
+                Return
+            }
+        }
+    }
+    Start-Sleep -Seconds 1
 }
 Write-Progress -Activity $Script_Title -Completed
 } #End Function
@@ -502,8 +530,8 @@ Write-Progress -Activity $Script_Title -Completed
 # SIG # Begin signature block
 # MIIi6AYJKoZIhvcNAQcCoIIi2TCCItUCAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUeOarFp2jgc+Z4+e5EM/9z3Ue
-# Is2gghzwMIIG7DCCBNSgAwIBAgIQMA9vrN1mmHR8qUY2p3gtuTANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUrZBjwtbXuhBmy5iUKvOIGrrO
+# e0WgghzwMIIG7DCCBNSgAwIBAgIQMA9vrN1mmHR8qUY2p3gtuTANBgkqhkiG9w0B
 # AQwFADCBiDELMAkGA1UEBhMCVVMxEzARBgNVBAgTCk5ldyBKZXJzZXkxFDASBgNV
 # BAcTC0plcnNleSBDaXR5MR4wHAYDVQQKExVUaGUgVVNFUlRSVVNUIE5ldHdvcmsx
 # LjAsBgNVBAMTJVVTRVJUcnVzdCBSU0EgQ2VydGlmaWNhdGlvbiBBdXRob3JpdHkw
@@ -662,29 +690,29 @@ Write-Progress -Activity $Script_Title -Completed
 # Ex5Tb3V0aHNpZGUgQmFuayBJbnRlcm1lZGlhdGUgQ0ECE0wAALbVuiaYWQZAIpIA
 # AAAAttUwCQYFKw4DAhoFAKB4MBgGCisGAQQBgjcCAQwxCjAIoAKAAKECgAAwGQYJ
 # KoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIBCzEOMAwGCisGAQQB
-# gjcCARUwIwYJKoZIhvcNAQkEMRYEFIJnLaSoflAPvededQlY4cp3Wov8MA0GCSqG
-# SIb3DQEBAQUABIIBANf3BcQ/j+Cr/DANQhk+cxt8uLcBNmPrcWL/7xD3EMf582S4
-# lU3FYGINomGqdT0bG3lKIn/QuEsMLAlblQU/U4PdoPT+mb+xj6MXmgzQPSfw7ACl
-# 4RsGNKiCIGGKTDgLdmY6Ag1xR725L/2Xc36kIMa1C1c882Gf4oB0Qzor+xWEO0RZ
-# f/aFEyIXbCzVJVWaOhTkifejXbZ/NV3OfXImxrHm7lBjmRrpkBseJThVOdgk1Aqx
-# r+SI4uOnXMl0a8LWo8y52sd6EQJ226pR3Itz2kscGNx7A9/zcSyVI+9ybhkJGKdB
-# ErnvAjjiW8YpODhmIZ2rZZYIcGrWXw3q0muGTQihggNLMIIDRwYJKoZIhvcNAQkG
+# gjcCARUwIwYJKoZIhvcNAQkEMRYEFPn6AmJWn9EgVPxLiS89g2CBAr1/MA0GCSqG
+# SIb3DQEBAQUABIIBAJ9v5vyGmrnljWgVqiSVoB2qslHHFGkfdQEY7tIF/Ez3VFGu
+# /XqN6E5jwi75Kkh7tEB2nguGOecEf0tMXXE6qiV1Mo5c9D+7roD6VJtkoa/eyXTa
+# mcJhTO1tot/XGjX/ggBGYaJAo+14HPyHBnZaSWBGtAouWZn1ItQ/ptclVpraVIw6
+# fFeZ8zA1bN5ucJP6IwxYFMTw4+SXX8jGWAlBrT7vXEHbMCR8vb9MU/eJsTYCwfZY
+# AOkfO6smqzDm9kPfp4juh/CwlIiGZmMEoznf3crlFZ2joq0hbnEna8G0pTwc9bx4
+# xeoLgMfegMlGM/z9OqTLsnCQCA9PhLS0zLpIO+yhggNLMIIDRwYJKoZIhvcNAQkG
 # MYIDODCCAzQCAQEwgZEwfTELMAkGA1UEBhMCR0IxGzAZBgNVBAgTEkdyZWF0ZXIg
 # TWFuY2hlc3RlcjEQMA4GA1UEBxMHU2FsZm9yZDEYMBYGA1UEChMPU2VjdGlnbyBM
 # aW1pdGVkMSUwIwYDVQQDExxTZWN0aWdvIFJTQSBUaW1lIFN0YW1waW5nIENBAhA5
 # TCXhfKBtJ6hl4jvZHSLUMA0GCWCGSAFlAwQCAgUAoHkwGAYJKoZIhvcNAQkDMQsG
-# CSqGSIb3DQEHATAcBgkqhkiG9w0BCQUxDxcNMjMxMDE4MjA1MzU1WjA/BgkqhkiG
-# 9w0BCQQxMgQw2RFM9cnxR8RXNj/GBW9piFiE7u70yZaKgSWMCnoW9QnrbNjFkrDG
-# 5NcisFXqbUUfMA0GCSqGSIb3DQEBAQUABIICADI1iuFFXnKiL48qyOm3l5ze0iVe
-# +XsUD4uj+Lph8pixkKQw6VKtNoiRON6zjAElTf4BQTqefMT1JGVvL9rWiYnQkLx5
-# UQv/yLhMlL5ZcnwwZXEixhlhX6Ivzf7EuINy7z4zxBvpcUiJx2jcNNeL7MEMppqU
-# l/U0x84RuEu7V0bGobHQj61/WnoyzZE1XFdRoCS7cmTeL6ped/cSCUIxN59IeBTH
-# Mx5WaywT+1IiIYaqA5dfs2CaL4rCtv0OQIPp0zAJjKN89KZx2NBDqwljwgAyLelY
-# SsfXemvy2qFVRKecX3azkVPUJMjavl5VfRNYy0vu2wMjlqf7/UqLDbkWuj39KWeQ
-# APbLbdYcZwNl3jUOGahYE/o5qIFYrsUsD6o5yT3ZaIHy5i9TfhmsBbyrABxnOPjm
-# H7lyjyEMmXOM5GZUoGCBp1PoqnJYaBD1DBNmpO8AQFDbImFMA/W9bzCcGGj0iKoM
-# 1BI775lZAk4m5tr3X/DEkaUsdEL1fc5qesCs473hbDXk0bppTUcy2OmJMaRWAWMF
-# 3o6uKBoz2N3knivIGhYmuHZq7umuSFJdURpuoCrxzHx4Ad54RqlB3g2bSMM/KqrV
-# XMETkLfRUcbBTehs5B5A0E0h8AkG4jDmO91z37zADeu6Q4MPs03+dwccFGqramOO
-# NtldpTOazCVu8wmP
+# CSqGSIb3DQEHATAcBgkqhkiG9w0BCQUxDxcNMjMxMTA3MjMwNzE0WjA/BgkqhkiG
+# 9w0BCQQxMgQw6ycW2mrhkGDtZD/42HTKGE2X7+ZDm5IzURhQ1gUMZyXIviWwQ1kL
+# Xqa1dsbRNCncMA0GCSqGSIb3DQEBAQUABIICAHbfgF3KRNuRv74DwP1tzu9db0R3
+# FQM/1fjLz0P0mNzqUOCGiOMKir01aCB8znUntTUhlFmzy8HgP762uqf2Km8JaRig
+# XCVxVCV7z+6nfr0+eWiF5wB7lw+7TKIl+BolP5lMgjAjWFO2MYRA9YDKj4jxRStU
+# +OIwGRbFO3mfxo6XJ59qrLLoj7vqq9cRE2EKM+qGJs/6SU4RlRLXotK/Mkk7bUjO
+# gaf//g9dJOWANLAdzIAflO+0Dxg+2ZZk1rOG+sCf/loBm/vTzYGyx2DgZRgIqoat
+# Zs44oecZyVlvfwAbVa105mNZubSdnk+XTHuFuK0jGW+5+5gVmjayXPRsxCyUSv1H
+# wdz5m5j2hOOPuC4rQKZU+z0bLXc0jDxhXaVOd22C4uCV6Pq+adV7CjXHY2x53l+i
+# XSe0t0Hr41jUQSljT4ni2r0PCh2OTGJCGAyjPJsccA1gAx6l0Np+20YMfPi0zr03
+# ESaW7nVnx4RqK/SkPFJS3FzckSLyabbGt/8oFgjxtnHookzuWzdybbd1IyPC2/1s
+# MtneOFwt+2Bki5zqE4sR4uf1aasosBrNDl5fMr/FMXLMFEJIovIJYbQRIwuN6/r5
+# 8U8PiSQMqcDBRf6QtTwDmZONbm7XPrAYpO7gcERZv+EQwVvbt5/PIue5X4sf8+3Z
+# WQoIy0BahDL3ZywX
 # SIG # End signature block
