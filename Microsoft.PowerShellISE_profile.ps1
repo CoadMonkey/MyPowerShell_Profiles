@@ -37,7 +37,7 @@ If ((Get-ItemProperty -Path HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell
 #################################################################################################
 Write-Host -ForegroundColor Yellow "Importing Modules..."
 #################################################################################################
-Import-PSSession (New-PSSession -name N8Exch4 -ConfigurationName Microsoft.Exchange -Authentication Kerberos -ConnectionUri http://exch4.southside.local/PowerShell/) -AllowClobber
+Import-PSSession (New-PSSession -name N8Exch2 -ConfigurationName Microsoft.Exchange -Authentication Kerberos -ConnectionUri http://exch2.southside.local/PowerShell/) -AllowClobber
 #################################################################################################
         ## SCCM Module ##
 # Site configuration
@@ -132,243 +132,6 @@ function Sign-Script
     }
 }
 #################################################################################################
-function Get-LastLoggedIn (){
-    Param (
-        [Parameter(Mandatory=$true)]$Machines,
-        [Switch]$Fast,
-        [Switch]$All
-    )
-    #Delcares
-    $SCCMCurrentLogonUser_msg = "User currently logged in according to SCCM." 
-    $SCCMLastLogonUser_msg = "Last Logged on user according to SCCM."
-    $WMIUser_msg = "User is currently logged in on Console session."
-    $WMIExplorer_msg = "User is currently logged in remotely (session may be locked)."
-    $ProfileFolder_msg = "Profile folder with most recent LastAccessTime."
-    $NoPingResponse_msg = "No ping response."
-    $UnableToDetermine_msg = "Unable to determine last user."
-
-    If ($Machines.count -gt 1) {$StartTime=get-date}
-    $ErrorActionPreference = 'SilentlyContinue'
-    $Ob_Arr=@()
-    $PSDrive_Backup = Get-Location
-    ForEach ($Machine in $Machines){
-        If ($Machines.count -gt 1) {
-            $Count+=1
-            Write-Progress -Activity "Get-LastLoggedIn" -Status "($Count of $($Machines.count))" -CurrentOperation $Machine -PercentComplete ($Count/$Machines.count*100) -Id 5 -ParentId 1
-        }
-#Just get all profile folders if doing -All
-        If ($All) {
-            $PingResults = $null
-            $PingResults = Test-Connection -count 1 $Machine
-            If ($PingResults){
-                if ($PSDrive_Backup.Provider.Name -eq "CMSite"){
-                    Set-Location $((get-psdrive|? {$_.Provider -like "*FileSystem*"}|Select Name -first 1).Name + ':')
-                }
-                $Folder=Get-ChildItem "\\$Machine\c$\Users" |Sort-Object LastAccessTime,LastWriteTime -Descending|Select-Object Name,LastAccessTime,LastWriteTime
-            }
-            Else {
-                Write-Error "Ping did not succeed.";Return $PingResults
-            }
-            Return $Folder
-        }
-        $Username = $null
-        $UserMethod = $null
-#Time to try some offline things...
-        #Try to get user via SCCM
-        If (Get-Module ConfigurationManager) {
-            Set-Location "$($SiteCode):\" @initParams
-            $SCCM_Device = Get-CMDevice -name $Machine
-            If (($SCCM_Device).CurrentLogonUser) {
-                $Username = ($SCCM_Device).CurrentLogonUser.replace("SOUTHSIDE\","").replace("southside\","")
-                $UserMethod = $SCCMCurrentLogonUser_msg
-            } Else {
-                If (($SCCM_Device).LastLogonUser) {
-                    $Username = ($SCCM_Device).LastLogonUser
-                    $UserMethod = $SCCMLastLogonUser_msg
-                }
-            }
-        } #End of SCCM module check
-#Time to try some online things...
-        If (!($Username) -and !($Fast)) {
-            $PingResults = $null
-            $PingResults = Test-Connection -count 1 $Machine
-            #Try to get user via WMI (Currently logged in on console)
-            If ($PingResults){
-                If (!($Username)) {
-                    $RPCAvail=$null
-                    3/$null            #Error bump
-                    $Username = (Get-WmiObject win32_computersystem -ComputerName $Machine|Select-Object username).username.replace("SOUTHSIDE\","").replace("southside\","")
-                    If ($error[0] -like "*The RPC server is unavailable*") {$RPCAvail=$False}Else{$RPCAvail=$True}
-                    If ($Username) {$UserMethod = $WMIUser_msg}
-                }
-                #Try to get user via Explorer processes
-                If (!($Username) -and $RPCAvail) {    #Skip second WMI command if first one has RPC failure to avoid extra 42 sec. timeout
-                    $Username = (Get-WmiObject -Class win32_process -Computername $Machine|? name -Match explorer|Sort-Object CreationDate -Descending|Select-Object -First 1).GetOwner().User
-                    If ($Username) {$UserMethod = $WMIExplorer_msg}
-                }
-                #Try to get user via User Profile folders
-                If (!($Username)){
-                    $Folder=Get-ChildItem "\\$Machine\c$\Users" |Sort-Object LastAccessTime -Descending|Select-Object Name,LastAccessTime -First 1
-                    $Username = $Folder.name.Replace(".000","").Replace(".001","").Replace(".002","").Replace(".southside","").Replace(".southside.000","").Replace(".southside.001","").Replace(".southside.002","").Replace(".SOUTHSIDE","").Replace(".SOUTHSIDE.000","").Replace(".SOUTHSIDE.001","").Replace(".SOUTHSIDE.002","")
-                    If ($Username) {$UserMethod = $WMIExplorer_msg}
-                }
-            }
-            Else {
-                $UserMethod = $NoPingResponse_msg
-            } #End of if ping / else
-        } #End of not Fast (Online) checks.
-#Time to build output object
-        If (!$Username -and !$UserMethod) {$UserMethod = $UnableToDetermine_msg}
-        $Obj=New-Object –TypeName PSObject -Property @{
-            Computer=$Machine
-            UserName=$Username
-            SCCMPrimaryUser=$SCCM_Device.PrimaryUser
-            UserGetMethod=$UserMethod
-        } #End of new object hash
-        $Ob_Arr+=$Obj
-    } #End main for-each loop
-    If ($Machines.count -gt 1){
-        Write-Host -ForegroundColor Green "Run time: $((Get-Date)-$StartTime)"
-        Write-Progress -Activity "Get-LastLoggedIn" -Id 5 -Completed
-    }
-    Set-Location $PSDrive_Backup
-    Return $Ob_Arr
-} #End Function
-#################################################################################################
-<# Function Title: Find-Computer
-Function Author: Nathan Anderson
-Function Version: 1.7.2
-Keywords: 
-
-Syntax: 
-     Find-Computer it-infsrv57-lt
-     Find-Computer 56mortge1,it-infsrv57-lt,asdfasdf
-     Find-Computer (Import-Csv .\12_21_2020.csv).ComputerName
-     $a = (Import-Csv .\12_21_2020.csv).ComputerName
-     $a += "it-infsrv57-lt","asdfasdf","it-nathana3-lt"
-     Find-Computer $a|sort-object LastLogonDate|ft Name,DistinguishedName,Enabled,IPv4Address,LastLogonDate,PasswordLastSet,whenChanged,Ping,LastUser
-     Find-Computer (Get-ADComputer -Filter {operatingsystem -like "*Pro*" -and enabled -eq $true} -Properties LastLogonDate | Where { $_.LastLogonDate -lt (Get-Date).AddDays(-14) } | select -ExpandProperty name)
-
-Purpose:
-     Get pertenant details about computers that will help track them down. Originally designed for inventory / falling off the domain help.
-     
-     Use -Fast switch to prevent reaching out to the PC. This will limit the amount of data returned.
-     
-Version Info:
-     1.0 - Built to help gather data on aging computers.
-     1.1 4/12/2021 Updated / streamlined code and object building. Removed ping success requirement for Get-LastLoggedIn since it can now get from SCCM. Incorporated more AD user lookups and more SCCM.
-     1.2 4/14/2021 Added user's department and title. Added -Fast.
-     1.3 4/16/2021 Removed SCCMIsActive, added email address
-     1.4 4/19/2021 Added Comptuer description and tweaked a little more speed by calling Get-LastLoggedIn -fast if the previous ping failed. Added SCCM Primary User(s).
-     1.5 9/7/2021 Added additional output to relay SCCM detection and -Fast switch detection.
-     1.6 2/21/2023 Removed Yellow "SCCM ConfigurationManager Module detected." and Fast mode output. Added support for using IPs too. Added variable sanitation in loop.
-     1.7 2/28/2023 Moved from SCCM's LastActiveTime to CNLastOnlineTime and noted UTC. Fixed missing IP Address from adding IP support.
-     1.7.1 3/1/2023 Changed test-netconnection to test-connection due to write-progress take-over.
-     1.7.2 3/2/2023 Added warning if comptuer not found in AD.
-	 *Can you get info from SDP? User, Department, Service Tag, asset state, last scan?
-#>
-
-function Find-Computer
-{
-    Param(
-        [Parameter(Mandatory=$True)]$Machines,
-        [Switch]$Fast
-    )
-
-    #Prerequisites
-    If (!(Get-Command Get-LastLoggedIn)) {Write-Error "Prerequisite Get-LastLoggedIn is not available.";Return}
-    If (!(Get-Command Get-AdComputer)) {Write-Error "Prerequisite Get-AdComputer is not available.";Return}
-    If (!(Get-Module ConfigurationManager)) {Write-Warning "SCCM ConfigurationManager Module not detected. Continuing..."}
-    $ErrorActionPreference = 'SilentlyContinue'
-    $PSLocationBackup = Get-Location
-
-    #Start the  main loop!
-    $Obj_Arr = @()
-    foreach ($Machine in $Machines) {
-        Remove-Variable S,L,A,P,D,U,IPAddress -ErrorAction SilentlyContinue
-        $D = Resolve-DnsName $Machine
-        If ($D.NameHost) {
-            $IPAddress = $Machine
-            $Machine = $D.NameHost.replace('.' + $((Get-DnsClientGlobalSetting).suffixsearchlist[0]),"")
-        } Else {
-            $IPAddress = $D.IPAddress
-        }
-        #Get AD Computer Info
-        If ($A = get-adcomputer -filter {name -eq $Machine} -Properties Name,DistinguishedName,Created,Enabled,LastLogonDate,OperatingSystem,Operatingsystemversion,PasswordLastSet,ManagedBy,Description) {
-            $A | Add-Member –MemberType NoteProperty –Name ManagedByFullName –Value $((get-aduser $A.ManagedBy -properties DisplayName).DisplayName) -Force
-        } Else {
-            Write-Warning "Computer not found in AD."
-        }
-        #Get more info from Computer
-        IF (!($Fast)) {$P = Test-Connection $Machine -count 1 -quiet -ErrorAction SilentlyContinue}
-        If (Get-Module ConfigurationManager) {
-            Set-Location "$($SiteCode):\" @initParams
-            $S = get-cmdevice -name $Machine
-            Set-Location $PSLocationBackup
-        }
-        #Get some user info
-        IF ($Fast -or !$P) {$L = Get-LastLoggedIn $Machine -Fast}
-        IF (!$Fast -and $P) {$L = Get-LastLoggedIn $Machine}
-        Remove-Variable U
-        $U = Get-ADUser $L.UserName -Properties DisplayName,ipPhone,Department,Description,EmailAddress
-        #Build Output Object
-        $Object = New-Object Psobject -Property @{
-	        Name = $Machine
-            ManagedBy = $A.ManagedBy
-            PCDescription = $A.Description
-            ManagedByFullName = $A.ManagedByFullName
-            DistinguishedName = $A.DistinguishedName
-            ADCreated = $A.Created
-            Enabled = $A.Enabled
-            PCLastLogonDate = $A.LastLogonDate
-            OperatingSystem = $A.OperatingSystem
-            Operatingsystemversion = $A.Operatingsystemversion
-            PCPasswordLastSet = $A.PasswordLastSet
-            IPAddress = $IPAddress
-            PingResult = $P
-            SCCMCNLastOnlineTimeUTC = $S.CNLastOnlineTime
-            SCCMClientVersion = $S.ClientVersion
-            MACAddress = $S.MACAddress
-            SerialNumber = $S.SerialNumber
-            IsVirtualMachine = $S.IsVirtualMachine
-            LastUser = $L.UserName
-            LastUserGetMethod = $L.UserGetMethod
-            LastUserFullName = $U.DisplayName
-            'PrimaryUser(s)' = $S.PrimaryUser
-            Department = $U.Department
-            UserDescription = $U.Description
-            EmailAddress = $U.EmailAddress
-            ipPhone = $U.ipPhone
-        }
-        $Obj_Arr += $Object
-    } #End main for-each loop
-    Return $Obj_Arr
-} #End Function
-#################################################################################################
-function Wait-Connection {
-Param (
-    [Parameter(Mandatory=$true, Position=0)][string] $Name_Or_IP
-)
-$Script_Title = "Wait-Connection"
-$Script_Author="Nathan Anderson"
-$Script_Version="1.0"
-<#-----------------------------------------------------------------------------
-Syntax: 
-    Wait-Connection [Host name or IP address]
-    
-Purpose:
-    Wait until Test-Connection succeeds.
-     
-Version Info:
-    1.0 2/2/2023
-	
------------------------------------------------------------------------------#>
-while (!(Test-Connection -count 1 -Quiet $Name_Or_IP)) {
-    Write-Progress -id 99 -Activity "Lost Connection" -Status "Waiting for connection..." -PercentComplete 2
-}
-Write-Progress -id 99 -Activity "Lost Connection" -Completed
-} #End Function
-#################################################################################################
 function ping
 {
     Param (
@@ -426,112 +189,12 @@ While ($true)
 }
 } #End Function
 #################################################################################################
-function Get-List {
-
-$Script_Title = "Get-List"
-$Script_Author="Nathan Anderson"
-$Script_Version="1.0"
-<#-----------------------------------------------------------------------------
-Syntax: 
-    Get-List
-
-Purpose:
-    Ability to paste a list into a variable.
-
-Version Info:
-    1.0 7/7/2023 First try.
-
------------------------------------------------------------------------------#>
-$Global:List = @(Read-Host "Paste in the list!" ) -split '\r\n' -split '\n\r' -split '\n' -split '\r' -split ',' -split ';' -split ' ' -split '\t'
-} #End Function
-#################################################################################################
-function Find-ADUser {
-Param(
-    [Parameter(Mandatory=$True)]$User
-)
-$Script_Title = "Find-ADUser"
-$Script_Author="Nathan Anderson"
-$Script_Version="1.1"
-<#-----------------------------------------------------------------------------
-Syntax: Find-User <Partial displayname or user id>
-    
-Purpose: Find AD user from partial search
-     
-Version Info:
-    1.0 9/18/2023 First!3
-    1.1 11/7/2023 Added username to search. Improved output to object and reduced data gathered.
-    Next: 
-        Allow array input (more than one lookup at a time)?
-	
------------------------------------------------------------------------------#>
-$User = "*" + $User + "*"
-$a = @(get-aduser -filter {displayname -like $User})
-$a += @(get-aduser -filter {name -like $User})
-$a = $a|Sort-Object -Unique
-return $a | Select-Object Enabled,GivenName,Surname,Name,UserPrincipalName
-} # End Function
-#################################################################################################
-function Count-Down {
-    [alias("Wait")]
-    Param (
-        [Parameter(
-            Mandatory=$true,
-            Position=0
-            )]
-            [Int]$Seconds
-    )
-$Script_Title = "Count-Down"
-$Script_Author="Nathan Anderson"
-$Script_Version="1.1"
-<#-----------------------------------------------------------------------------
-Purpose:
-    to Count-Down -Seconds with a progress bar.
-
-Version Info:
-    1.0 7/4/2023 First try
-    1.1 11/6/2023 Added human inturrupt w/ Esc key. (Not available for ISE shells). Added blank lines to allow room for progress bars.
-	
------------------------------------------------------------------------------#>
-# Add blank lines to make room for progress bars.
-Write-Host `n`n`n`n`n`n`n`n
-For ($i=$Seconds; $i -gt 0; $i--) {
-
-    # Update the progress bar
-	If ($psISE) {
-        Write-Progress -Activity $Script_Title -Status $i -PercentComplete ($i / ($Seconds) * 100)
-    } Else {
-        Write-Progress -Activity $Script_Title -Status $i -PercentComplete ($i / ($Seconds) * 100) -CurrentOperation "Press Esc to inturrupt."
-    }
-
-    # Non-blocking key detection does not work in ISE shell. (Alt method: $Host.Name)
-    If (!($psISE)) {
-        
-        # Break if Esc key pressed.
-        While ([Console]::KeyAvailable) {
-            $keyInfo = [Console]::ReadKey($true)
-            If ($keyInfo.Key -eq [ConsoleKey]::Escape) {
-                
-                # Flush the read buffer in case of rapid key submission to prevent additional keys being sent to parent scope.
-                While ([Console]::KeyAvailable) {
-                    [Console]::ReadKey($true)
-                }
-
-                Write-Progress -Activity $Script_Title -Completed
-                Return
-            }
-        }
-    }
-    Start-Sleep -Seconds 1
-}
-Write-Progress -Activity $Script_Title -Completed
-} #End Function
-#################################################################################################
 
 # SIG # Begin signature block
-# MIIi6AYJKoZIhvcNAQcCoIIi2TCCItUCAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
+# MIIjDQYJKoZIhvcNAQcCoIIi/jCCIvoCAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUrZBjwtbXuhBmy5iUKvOIGrrO
-# e0WgghzwMIIG7DCCBNSgAwIBAgIQMA9vrN1mmHR8qUY2p3gtuTANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUQ5B3yy3AbuNU9Ing6uoViUqH
+# ZyOggh0VMIIG7DCCBNSgAwIBAgIQMA9vrN1mmHR8qUY2p3gtuTANBgkqhkiG9w0B
 # AQwFADCBiDELMAkGA1UEBhMCVVMxEzARBgNVBAgTCk5ldyBKZXJzZXkxFDASBgNV
 # BAcTC0plcnNleSBDaXR5MR4wHAYDVQQKExVUaGUgVVNFUlRSVVNUIE5ldHdvcmsx
 # LjAsBgNVBAMTJVVTRVJUcnVzdCBSU0EgQ2VydGlmaWNhdGlvbiBBdXRob3JpdHkw
@@ -568,151 +231,152 @@ Write-Progress -Activity $Script_Title -Completed
 # h8FuTVrTHurwROYybxzrF06Uw3hlIDsPQaof6aFBnf6xuKBlKjTg3qj5PObBMLvA
 # oGMs/FwWAKjQxH/qEZ0eBsambTJdtDgJK0kHqv3sMNrxpy/Pt/360KOE2See+wFm
 # d7lWEOEgbsausfm2usg1XTN2jvF8IAwqd661ogKGuinutFoAsYyr4/kKyVRd1Llq
-# dJ69SK6YMIIG7TCCBNWgAwIBAgITLgAAAAImihHGTFhRmQAAAAAAAjANBgkqhkiG
-# 9w0BAQsFADAhMR8wHQYDVQQDExZTb3V0aHNpZGUgQmFuayBSb290IENBMB4XDTE3
-# MDMwMjE2NDY1NFoXDTI1MDMwMjE2NTY1NFowWzEVMBMGCgmSJomT8ixkARkWBWxv
-# Y2FsMRkwFwYKCZImiZPyLGQBGRYJc291dGhzaWRlMScwJQYDVQQDEx5Tb3V0aHNp
-# ZGUgQmFuayBJbnRlcm1lZGlhdGUgQ0EwggIiMA0GCSqGSIb3DQEBAQUAA4ICDwAw
-# ggIKAoICAQCfnlgy7aRsWtRENBM4rDHXqZ/uhUZtf/mtWzI2NqTnm0KJJl8ao1ap
-# ls/EW0M8Ah5FHoXpucFVjmIaAVM1cEZt0olZ+uWdQR4ksFgYoVkNPKWARE/p11PB
-# FQCEADU7D7MMtmCNvLSfDa658CEuH4Bwt7Jg/rbAdqyN+ZqK8t7ZwJ+BqthEQx/x
-# cGbP6N0SlQJ16hsLOajkzQCkPOs+g+E6iCQHV7h6xIqeK+G+azZ4kBzmKaQvj6tH
-# ROhwZqVlL72TQp6HRMPCD1eTvNPolEc+Ht3W6MDv7Wk92RUvYZL82LrmUNkG2Hy3
-# VFgHb0K4381BlYaeUiNx56NGFBSzjnvHbVYYppUe6cILgosKSNktL9H7cGAP6tfo
-# 8U6wY8J7agUisOEYbIFh3kMhyzsKewdnReD9pzTffEHoaMo6wlL4mvskg4iuX+Ie
-# a0CMmaSEkmnvYxlyt+dbJtr62RjsCZO72tHp1IpPrI5GBBNEC5eJ548W2TToHMrx
-# /9hi+86VflWTchkhfjEIZ7yiEgu4CjLPBdQB7MIkF8nrL99I5/J3VzZ6o5zMwkno
-# g31aFfxWOFGiz3H7dd0REknL/Z660AIMPxPoBXJoXtPxsTnRF7Xl8BMkq/ljAtt3
-# rsj5Y78SWNZZt2gshn5neY7ciNZkMp2cmMnu8vmOV6BLX9s83eJvXQIDAQABo4IB
-# 4jCCAd4wEAYJKwYBBAGCNxUBBAMCAQAwHQYDVR0OBBYEFLb+NI5ijlm8ixD+aJ34
-# 1TqQSgb1MBkGCSsGAQQBgjcUAgQMHgoAUwB1AGIAQwBBMAsGA1UdDwQEAwIBhjAP
-# BgNVHRMBAf8EBTADAQH/MB8GA1UdIwQYMBaAFOmKB7ZAxkKkbtsj8OZYjiiLenLq
-# MIGWBgNVHR8EgY4wgYswgYiggYWggYKGO2ZpbGU6Ly8vL1JPT1RDQS9DZXJ0RW5y
-# b2xsL1NvdXRoc2lkZSUyMEJhbmslMjBSb290JTIwQ0EuY3JshkNodHRwOi8vY2Eu
-# c291dGhzaWRlLmxvY2FsL2NlcnRkYXRhL1NvdXRoc2lkZSUyMEJhbmslMjBSb290
-# JTIwQ0EuY3JsMIG3BggrBgEFBQcBAQSBqjCBpzBOBggrBgEFBQcwAoZCZmlsZTov
-# Ly8vUk9PVENBL0NlcnRFbnJvbGwvUk9PVENBX1NvdXRoc2lkZSUyMEJhbmslMjBS
-# b290JTIwQ0EuY3J0MFUGCCsGAQUFBzAChklodHRwOi8vY2Euc291dGhzaWRlLmxv
-# Y2FsL2NlcnRkYXRhL1JPT1RDQVNvdXRoc2lkZSUyMEJhbmslMjBSb290JTIwQ0Eu
-# Y3J0MA0GCSqGSIb3DQEBCwUAA4ICAQAf2vFJkMJY6d/a2wMSO13Br1GgKk/3FSOU
-# utdrd45XyI9o5h+wg0YKwk2+WF2qaUbSNpcjc0xxpVLib1xvHmY80n/s+/CQT25T
-# BIld+SkLMP1fQh0cKhkA8O0YjQvQYIxjx8BNJSR5KWC+aj06SCg89tvt/9Cl2Awv
-# x614BOk3YLMrbFvaN3bBqjNj8fg07KqvtkXivl3Edfc7i942RbY1i2HeJG+8ibfR
-# IO6GylPIZ5RY/BVlIM8D+VlaYQBHS3s0oBq9ZEHaq7iVS7dcqoFjJd4AsoyJlbZS
-# J7l4QLHk+nsSlN34/Mc0iW1+bjobJ3z1ym+VEP8kPxD+JFAZ5BjJZf/ygAe7dZGP
-# fDXGW+fPVrGfbVvmJMbf21+BBzrjWF59pUHC5A/DnLyy0jiMDJ0tyG1vCHoDTWy9
-# klVWtsCCbEZLtKGJDocXmPeWdrQrJEoWypNYRSTTIQ0P01/B6Znf8ceyVMABG8PX
-# +LDQGWeerwBPlh+SfJEUse0+BC5MDGYbQHjlQpsNgB56Sgqdfw+UIVVS7BP9JRdz
-# une2amuS3zcprwt+0+unor3H0pW/Efh281V/U9M1kR/9Z70tY93gxGx+ewYC197b
-# hFNAbpGbs2nX4XLaz1Tnjnim0K/gVGLJs3+DNF3lanRr32jwt8QyZ2xJiltI6CkY
-# xhLm52/ygzCCBvUwggTdoAMCAQICEDlMJeF8oG0nqGXiO9kdItQwDQYJKoZIhvcN
-# AQEMBQAwfTELMAkGA1UEBhMCR0IxGzAZBgNVBAgTEkdyZWF0ZXIgTWFuY2hlc3Rl
-# cjEQMA4GA1UEBxMHU2FsZm9yZDEYMBYGA1UEChMPU2VjdGlnbyBMaW1pdGVkMSUw
-# IwYDVQQDExxTZWN0aWdvIFJTQSBUaW1lIFN0YW1waW5nIENBMB4XDTIzMDUwMzAw
-# MDAwMFoXDTM0MDgwMjIzNTk1OVowajELMAkGA1UEBhMCR0IxEzARBgNVBAgTCk1h
-# bmNoZXN0ZXIxGDAWBgNVBAoTD1NlY3RpZ28gTGltaXRlZDEsMCoGA1UEAwwjU2Vj
-# dGlnbyBSU0EgVGltZSBTdGFtcGluZyBTaWduZXIgIzQwggIiMA0GCSqGSIb3DQEB
-# AQUAA4ICDwAwggIKAoICAQCkkyhSS88nh3akKRyZOMDnDtTRHOxoywFk5IrNd7Bx
-# ZYK8n/yLu7uVmPslEY5aiAlmERRYsroiW+b2MvFdLcB6og7g4FZk7aHlgSByIGRB
-# bMfDCPrzfV3vIZrCftcsw7oRmB780yAIQrNfv3+IWDKrMLPYjHqWShkTXKz856vp
-# HBYusLA4lUrPhVCrZwMlobs46Q9vqVqakSgTNbkf8z3hJMhrsZnoDe+7TeU9jFQD
-# kdD8Lc9VMzh6CRwH0SLgY4anvv3Sg3MSFJuaTAlGvTS84UtQe3LgW/0Zux88ahl7
-# brstRCq+PEzMrIoEk8ZXhqBzNiuBl/obm36Ih9hSeYn+bnc317tQn/oYJU8T8l58
-# qbEgWimro0KHd+D0TAJI3VilU6ajoO0ZlmUVKcXtMzAl5paDgZr2YGaQWAeAzUJ1
-# rPu0kdDF3QFAaraoEO72jXq3nnWv06VLGKEMn1ewXiVHkXTNdRLRnG/kXg2b7HUm
-# 7v7T9ZIvUoXo2kRRKqLMAMqHZkOjGwDvorWWnWKtJwvyG0rJw5RCN4gghKiHrsO6
-# I3J7+FTv+GsnsIX1p0OF2Cs5dNtadwLRpPr1zZw9zB+uUdB7bNgdLRFCU3F0wuU1
-# qi1SEtklz/DT0JFDEtcyfZhs43dByP8fJFTvbq3GPlV78VyHOmTxYEsFT++5L+wJ
-# EwIDAQABo4IBgjCCAX4wHwYDVR0jBBgwFoAUGqH4YRkgD8NBd0UojtE1XwYSBFUw
-# HQYDVR0OBBYEFAMPMciRKpO9Y/PRXU2kNA/SlQEYMA4GA1UdDwEB/wQEAwIGwDAM
-# BgNVHRMBAf8EAjAAMBYGA1UdJQEB/wQMMAoGCCsGAQUFBwMIMEoGA1UdIARDMEEw
-# NQYMKwYBBAGyMQECAQMIMCUwIwYIKwYBBQUHAgEWF2h0dHBzOi8vc2VjdGlnby5j
-# b20vQ1BTMAgGBmeBDAEEAjBEBgNVHR8EPTA7MDmgN6A1hjNodHRwOi8vY3JsLnNl
-# Y3RpZ28uY29tL1NlY3RpZ29SU0FUaW1lU3RhbXBpbmdDQS5jcmwwdAYIKwYBBQUH
-# AQEEaDBmMD8GCCsGAQUFBzAChjNodHRwOi8vY3J0LnNlY3RpZ28uY29tL1NlY3Rp
-# Z29SU0FUaW1lU3RhbXBpbmdDQS5jcnQwIwYIKwYBBQUHMAGGF2h0dHA6Ly9vY3Nw
-# LnNlY3RpZ28uY29tMA0GCSqGSIb3DQEBDAUAA4ICAQBMm2VY+uB5z+8VwzJt3jOR
-# 63dY4uu9y0o8dd5+lG3DIscEld9laWETDPYMnvWJIF7Bh8cDJMrHpfAm3/j4MWUN
-# 4OttUVemjIRSCEYcKsLe8tqKRfO+9/YuxH7t+O1ov3pWSOlh5Zo5d7y+upFkiHX/
-# XYUWNCfSKcv/7S3a/76TDOxtog3Mw/FuvSGRGiMAUq2X1GJ4KoR5qNc9rCGPcMMk
-# eTqX8Q2jo1tT2KsAulj7NYBPXyhxbBlewoNykK7gxtjymfvqtJJlfAd8NUQdrVgY
-# a2L73mzECqls0yFGcNwvjXVMI8JB0HqWO8NL3c2SJnR2XDegmiSeTl9O048P5RNP
-# WURlS0Nkz0j4Z2e5Tb/MDbE6MNChPUitemXk7N/gAfCzKko5rMGk+al9NdAyQKCx
-# GSoYIbLIfQVxGksnNqrgmByDdefHfkuEQ81D+5CXdioSrEDBcFuZCkD6gG2UYXvI
-# brnIZ2ckXFCNASDeB/cB1PguEc2dg+X4yiUcRD0n5bCGRyoLG4R2fXtoT4239xO0
-# 7aAt7nMP2RC6nZksfNd1H48QxJTmfiTllUqIjCfWhWYd+a5kdpHoSP7IVQrtKcMf
-# 3jimwBT7Mj34qYNiNsjDvgCHHKv6SkIciQPc9Vx8cNldeE7un14g5glqfCsIo0j1
-# FfwET9/NIRx65fWOGtS5QDCCCBIwggX6oAMCAQICE0wAALbVuiaYWQZAIpIAAAAA
-# ttUwDQYJKoZIhvcNAQELBQAwWzEVMBMGCgmSJomT8ixkARkWBWxvY2FsMRkwFwYK
-# CZImiZPyLGQBGRYJc291dGhzaWRlMScwJQYDVQQDEx5Tb3V0aHNpZGUgQmFuayBJ
-# bnRlcm1lZGlhdGUgQ0EwHhcNMjMwNzA2MTUxMzEyWhcNMjUwMzAyMTY1NjU0WjB1
-# MRUwEwYKCZImiZPyLGQBGRYFbG9jYWwxGTAXBgoJkiaJk/IsZAEZFglzb3V0aHNp
-# ZGUxFzAVBgNVBAsMDkJyYW5jaGVzX1VzZXJzMRcwFQYDVQQLDA5fQ29tcHV0ZXIg
-# RGVwdDEPMA0GA1UEAxMGQU5ERVJOMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIB
-# CgKCAQEA3USBg/lJgib88F98OQLaUUHf//tlms0JXbFi9QDXc/9tGZizeKEG3Z9I
-# YwtVCXwdUscppanPLK1XAG14bz2p4oiJWenif35CHQpwJex+5i12Q6QU7+QRMDm3
-# o9dJCdsmlZU8rQ3AY5ucBM9M40wz5YKCQMaE+DAurOtYcupwMJ/Z+3fZdWSZ9Lib
-# HhWeUqwru14Z1fbHi0nLsen5qANGDMtRX/QNdG0qJYA/aSxMh+le6NmMPNgNo57h
-# AOuhDDZoJ50xgLwVFI0rTRfKLRZ0PB9iPL3BNre0ZwKNbolIGV/gfch/zUKwhtZ8
-# qiWLvlHDPUYL6kHv9JSXgkdpn7WZqQIDAQABo4IDszCCA68wPQYJKwYBBAGCNxUH
-# BDAwLgYmKwYBBAGCNxUIgvi9QYWBo0mBsYUEhJhygsKqDIFbht+nIoOavwACAWUC
-# AQAwEwYDVR0lBAwwCgYIKwYBBQUHAwMwDgYDVR0PAQH/BAQDAgeAMBsGCSsGAQQB
-# gjcVCgQOMAwwCgYIKwYBBQUHAwMwHQYDVR0OBBYEFJSfxen8Ka2WpHBOH5JgXGoC
-# 47ZiMB8GA1UdIwQYMBaAFLb+NI5ijlm8ixD+aJ341TqQSgb1MIIBggYDVR0fBIIB
-# eTCCAXUwggFxoIIBbaCCAWmGgcpsZGFwOi8vL0NOPVNvdXRoc2lkZSUyMEJhbmsl
-# MjBJbnRlcm1lZGlhdGUlMjBDQSxDTj1jYSxDTj1DRFAsQ049UHVibGljJTIwS2V5
-# JTIwU2VydmljZXMsQ049U2VydmljZXMsQ049Q29uZmlndXJhdGlvbixEQz1zb3V0
-# aHNpZGUsREM9bG9jYWw/Y2VydGlmaWNhdGVSZXZvY2F0aW9uTGlzdD9iYXNlP29i
-# amVjdENsYXNzPWNSTERpc3RyaWJ1dGlvblBvaW50hk1odHRwOi8vY2Euc291dGhz
-# aWRlLmxvY2FsL0NlcnRFbnJvbGwvU291dGhzaWRlJTIwQmFuayUyMEludGVybWVk
-# aWF0ZSUyMENBLmNybIZLaHR0cDovL2NhLnNvdXRoc2lkZS5sb2NhbC9jZXJ0ZGF0
-# YS9Tb3V0aHNpZGUlMjBCYW5rJTIwSW50ZXJtZWRpYXRlJTIwQ0EuY3JsMIHaBggr
-# BgEFBQcBAQSBzTCByjCBxwYIKwYBBQUHMAKGgbpsZGFwOi8vL0NOPVNvdXRoc2lk
-# ZSUyMEJhbmslMjBJbnRlcm1lZGlhdGUlMjBDQSxDTj1BSUEsQ049UHVibGljJTIw
-# S2V5JTIwU2VydmljZXMsQ049U2VydmljZXMsQ049Q29uZmlndXJhdGlvbixEQz1z
-# b3V0aHNpZGUsREM9bG9jYWw/Y0FDZXJ0aWZpY2F0ZT9iYXNlP29iamVjdENsYXNz
-# PWNlcnRpZmljYXRpb25BdXRob3JpdHkwOAYDVR0RBDEwL6AtBgorBgEEAYI3FAID
-# oB8MHW5hdGhhbi5hbmRlcnNvbkBzb3V0aHNpZGUuY29tME8GCSsGAQQBgjcZAgRC
-# MECgPgYKKwYBBAGCNxkCAaAwBC5TLTEtNS0yMS0yMDg4Mzk1MzE0LTQ0ODQxNTI4
-# MC0xNTMyMzEzMDU1LTM1NzcxMA0GCSqGSIb3DQEBCwUAA4ICAQBD+DGTl0H1f/5y
-# XPjRrTL6J2fDd5E99RLW5kcLZ3ESH6+4/r3FA1dpDQlhn7XLOgywmruLvahXL2Xo
-# u6qSLZOg/jI//fEuifu4I6OR5c17I6fb6ppTvxBKT1Qg+njsa/O48vZ2fjw6qSdf
-# jBUBgxAQAUZKxjXcpyU5juKHzkX45HsLfcPN8XpHJ4x7QSKWYWy0P/biYM2mxAjJ
-# q54OMKmPoQHYQX1IUaPMJuqIQRINxZvaL2FtTJAkZnX2/wpeqUWqeLuBEgl79s1Q
-# bjRlwSGuDkjkexH5p70ZM7ttTyzd0qjghHJHkoYF/2sbAcsEwKvq1msTtmzbfBUi
-# v6MTfU4rtdKLCFRZncu9qHC38mTxj48HiJBxo587lDaq5vqsp/ux3C4vL+sN40qE
-# /0l86nKx6WN6n47u9dqJq/dAZxHggMoSs+0elJPAYClC7AkLCNbl9aMU6lkwzVRQ
-# Hj3M8IdHX4AZ4ru/smE3jQGXMqDpV0iYKTyM37y30/O/bKkqC7UJxMKeLqxceLND
-# 1Pkhb/VLnWIEvz0L1/DlMMWxpFk7dXe8KMVpiKdzfRcq60LMDQjVlSO6CDmrKcfh
-# GbZafFNL05NGYeMS3/NAAR0AghgYcR8obSATVZs3hXWXyUV9KDmAHjw15ARApC4Q
-# V5LhM4mHq6fJ2OvkXTrJ+5WGfzIJojGCBWIwggVeAgEBMHIwWzEVMBMGCgmSJomT
+# dJ69SK6YMIIG9TCCBN2gAwIBAgIQOUwl4XygbSeoZeI72R0i1DANBgkqhkiG9w0B
+# AQwFADB9MQswCQYDVQQGEwJHQjEbMBkGA1UECBMSR3JlYXRlciBNYW5jaGVzdGVy
+# MRAwDgYDVQQHEwdTYWxmb3JkMRgwFgYDVQQKEw9TZWN0aWdvIExpbWl0ZWQxJTAj
+# BgNVBAMTHFNlY3RpZ28gUlNBIFRpbWUgU3RhbXBpbmcgQ0EwHhcNMjMwNTAzMDAw
+# MDAwWhcNMzQwODAyMjM1OTU5WjBqMQswCQYDVQQGEwJHQjETMBEGA1UECBMKTWFu
+# Y2hlc3RlcjEYMBYGA1UEChMPU2VjdGlnbyBMaW1pdGVkMSwwKgYDVQQDDCNTZWN0
+# aWdvIFJTQSBUaW1lIFN0YW1waW5nIFNpZ25lciAjNDCCAiIwDQYJKoZIhvcNAQEB
+# BQADggIPADCCAgoCggIBAKSTKFJLzyeHdqQpHJk4wOcO1NEc7GjLAWTkis13sHFl
+# gryf/Iu7u5WY+yURjlqICWYRFFiyuiJb5vYy8V0twHqiDuDgVmTtoeWBIHIgZEFs
+# x8MI+vN9Xe8hmsJ+1yzDuhGYHvzTIAhCs1+/f4hYMqsws9iMepZKGRNcrPznq+kc
+# Fi6wsDiVSs+FUKtnAyWhuzjpD2+pWpqRKBM1uR/zPeEkyGuxmegN77tN5T2MVAOR
+# 0Pwtz1UzOHoJHAfRIuBjhqe+/dKDcxIUm5pMCUa9NLzhS1B7cuBb/Rm7HzxqGXtu
+# uy1EKr48TMysigSTxleGoHM2K4GX+hubfoiH2FJ5if5udzfXu1Cf+hglTxPyXnyp
+# sSBaKaujQod34PRMAkjdWKVTpqOg7RmWZRUpxe0zMCXmloOBmvZgZpBYB4DNQnWs
+# +7SR0MXdAUBqtqgQ7vaNereeda/TpUsYoQyfV7BeJUeRdM11EtGcb+ReDZvsdSbu
+# /tP1ki9ShejaRFEqoswAyodmQ6MbAO+itZadYq0nC/IbSsnDlEI3iCCEqIeuw7oj
+# cnv4VO/4ayewhfWnQ4XYKzl021p3AtGk+vXNnD3MH65R0Hts2B0tEUJTcXTC5TWq
+# LVIS2SXP8NPQkUMS1zJ9mGzjd0HI/x8kVO9urcY+VXvxXIc6ZPFgSwVP77kv7AkT
+# AgMBAAGjggGCMIIBfjAfBgNVHSMEGDAWgBQaofhhGSAPw0F3RSiO0TVfBhIEVTAd
+# BgNVHQ4EFgQUAw8xyJEqk71j89FdTaQ0D9KVARgwDgYDVR0PAQH/BAQDAgbAMAwG
+# A1UdEwEB/wQCMAAwFgYDVR0lAQH/BAwwCgYIKwYBBQUHAwgwSgYDVR0gBEMwQTA1
+# BgwrBgEEAbIxAQIBAwgwJTAjBggrBgEFBQcCARYXaHR0cHM6Ly9zZWN0aWdvLmNv
+# bS9DUFMwCAYGZ4EMAQQCMEQGA1UdHwQ9MDswOaA3oDWGM2h0dHA6Ly9jcmwuc2Vj
+# dGlnby5jb20vU2VjdGlnb1JTQVRpbWVTdGFtcGluZ0NBLmNybDB0BggrBgEFBQcB
+# AQRoMGYwPwYIKwYBBQUHMAKGM2h0dHA6Ly9jcnQuc2VjdGlnby5jb20vU2VjdGln
+# b1JTQVRpbWVTdGFtcGluZ0NBLmNydDAjBggrBgEFBQcwAYYXaHR0cDovL29jc3Au
+# c2VjdGlnby5jb20wDQYJKoZIhvcNAQEMBQADggIBAEybZVj64HnP7xXDMm3eM5Hr
+# d1ji673LSjx13n6UbcMixwSV32VpYRMM9gye9YkgXsGHxwMkysel8Cbf+PgxZQ3g
+# 621RV6aMhFIIRhwqwt7y2opF87739i7Efu347Wi/elZI6WHlmjl3vL66kWSIdf9d
+# hRY0J9Ipy//tLdr/vpMM7G2iDczD8W69IZEaIwBSrZfUYngqhHmo1z2sIY9wwyR5
+# OpfxDaOjW1PYqwC6WPs1gE9fKHFsGV7Cg3KQruDG2PKZ++q0kmV8B3w1RB2tWBhr
+# YvvebMQKqWzTIUZw3C+NdUwjwkHQepY7w0vdzZImdHZcN6CaJJ5OX07Tjw/lE09Z
+# RGVLQ2TPSPhnZ7lNv8wNsTow0KE9SK16ZeTs3+AB8LMqSjmswaT5qX010DJAoLEZ
+# Khghssh9BXEaSyc2quCYHIN158d+S4RDzUP7kJd2KhKsQMFwW5kKQPqAbZRhe8hu
+# uchnZyRcUI0BIN4H9wHU+C4RzZ2D5fjKJRxEPSflsIZHKgsbhHZ9e2hPjbf3E7Tt
+# oC3ucw/ZELqdmSx813UfjxDElOZ+JOWVSoiMJ9aFZh35rmR2kehI/shVCu0pwx/e
+# OKbAFPsyPfipg2I2yMO+AIccq/pKQhyJA9z1XHxw2V14Tu6fXiDmCWp8KwijSPUV
+# /ARP380hHHrl9Y4a1LlAMIIHEjCCBPqgAwIBAgITLgAAAAMraOwmaUObAgAAAAAA
+# AzANBgkqhkiG9w0BAQsFADAhMR8wHQYDVQQDExZTb3V0aHNpZGUgQmFuayBSb290
+# IENBMB4XDTI0MDIwMjE2MTk0MVoXDTMyMDIwMjE2Mjk0MVowWzEVMBMGCgmSJomT
 # 8ixkARkWBWxvY2FsMRkwFwYKCZImiZPyLGQBGRYJc291dGhzaWRlMScwJQYDVQQD
-# Ex5Tb3V0aHNpZGUgQmFuayBJbnRlcm1lZGlhdGUgQ0ECE0wAALbVuiaYWQZAIpIA
-# AAAAttUwCQYFKw4DAhoFAKB4MBgGCisGAQQBgjcCAQwxCjAIoAKAAKECgAAwGQYJ
-# KoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIBCzEOMAwGCisGAQQB
-# gjcCARUwIwYJKoZIhvcNAQkEMRYEFPn6AmJWn9EgVPxLiS89g2CBAr1/MA0GCSqG
-# SIb3DQEBAQUABIIBAJ9v5vyGmrnljWgVqiSVoB2qslHHFGkfdQEY7tIF/Ez3VFGu
-# /XqN6E5jwi75Kkh7tEB2nguGOecEf0tMXXE6qiV1Mo5c9D+7roD6VJtkoa/eyXTa
-# mcJhTO1tot/XGjX/ggBGYaJAo+14HPyHBnZaSWBGtAouWZn1ItQ/ptclVpraVIw6
-# fFeZ8zA1bN5ucJP6IwxYFMTw4+SXX8jGWAlBrT7vXEHbMCR8vb9MU/eJsTYCwfZY
-# AOkfO6smqzDm9kPfp4juh/CwlIiGZmMEoznf3crlFZ2joq0hbnEna8G0pTwc9bx4
-# xeoLgMfegMlGM/z9OqTLsnCQCA9PhLS0zLpIO+yhggNLMIIDRwYJKoZIhvcNAQkG
-# MYIDODCCAzQCAQEwgZEwfTELMAkGA1UEBhMCR0IxGzAZBgNVBAgTEkdyZWF0ZXIg
-# TWFuY2hlc3RlcjEQMA4GA1UEBxMHU2FsZm9yZDEYMBYGA1UEChMPU2VjdGlnbyBM
-# aW1pdGVkMSUwIwYDVQQDExxTZWN0aWdvIFJTQSBUaW1lIFN0YW1waW5nIENBAhA5
-# TCXhfKBtJ6hl4jvZHSLUMA0GCWCGSAFlAwQCAgUAoHkwGAYJKoZIhvcNAQkDMQsG
-# CSqGSIb3DQEHATAcBgkqhkiG9w0BCQUxDxcNMjMxMTA3MjMwNzE0WjA/BgkqhkiG
-# 9w0BCQQxMgQw6ycW2mrhkGDtZD/42HTKGE2X7+ZDm5IzURhQ1gUMZyXIviWwQ1kL
-# Xqa1dsbRNCncMA0GCSqGSIb3DQEBAQUABIICAHbfgF3KRNuRv74DwP1tzu9db0R3
-# FQM/1fjLz0P0mNzqUOCGiOMKir01aCB8znUntTUhlFmzy8HgP762uqf2Km8JaRig
-# XCVxVCV7z+6nfr0+eWiF5wB7lw+7TKIl+BolP5lMgjAjWFO2MYRA9YDKj4jxRStU
-# +OIwGRbFO3mfxo6XJ59qrLLoj7vqq9cRE2EKM+qGJs/6SU4RlRLXotK/Mkk7bUjO
-# gaf//g9dJOWANLAdzIAflO+0Dxg+2ZZk1rOG+sCf/loBm/vTzYGyx2DgZRgIqoat
-# Zs44oecZyVlvfwAbVa105mNZubSdnk+XTHuFuK0jGW+5+5gVmjayXPRsxCyUSv1H
-# wdz5m5j2hOOPuC4rQKZU+z0bLXc0jDxhXaVOd22C4uCV6Pq+adV7CjXHY2x53l+i
-# XSe0t0Hr41jUQSljT4ni2r0PCh2OTGJCGAyjPJsccA1gAx6l0Np+20YMfPi0zr03
-# ESaW7nVnx4RqK/SkPFJS3FzckSLyabbGt/8oFgjxtnHookzuWzdybbd1IyPC2/1s
-# MtneOFwt+2Bki5zqE4sR4uf1aasosBrNDl5fMr/FMXLMFEJIovIJYbQRIwuN6/r5
-# 8U8PiSQMqcDBRf6QtTwDmZONbm7XPrAYpO7gcERZv+EQwVvbt5/PIue5X4sf8+3Z
-# WQoIy0BahDL3ZywX
+# Ex5Tb3V0aHNpZGUgQmFuayBJbnRlcm1lZGlhdGUgQ0EwggIiMA0GCSqGSIb3DQEB
+# AQUAA4ICDwAwggIKAoICAQCfnlgy7aRsWtRENBM4rDHXqZ/uhUZtf/mtWzI2NqTn
+# m0KJJl8ao1apls/EW0M8Ah5FHoXpucFVjmIaAVM1cEZt0olZ+uWdQR4ksFgYoVkN
+# PKWARE/p11PBFQCEADU7D7MMtmCNvLSfDa658CEuH4Bwt7Jg/rbAdqyN+ZqK8t7Z
+# wJ+BqthEQx/xcGbP6N0SlQJ16hsLOajkzQCkPOs+g+E6iCQHV7h6xIqeK+G+azZ4
+# kBzmKaQvj6tHROhwZqVlL72TQp6HRMPCD1eTvNPolEc+Ht3W6MDv7Wk92RUvYZL8
+# 2LrmUNkG2Hy3VFgHb0K4381BlYaeUiNx56NGFBSzjnvHbVYYppUe6cILgosKSNkt
+# L9H7cGAP6tfo8U6wY8J7agUisOEYbIFh3kMhyzsKewdnReD9pzTffEHoaMo6wlL4
+# mvskg4iuX+Iea0CMmaSEkmnvYxlyt+dbJtr62RjsCZO72tHp1IpPrI5GBBNEC5eJ
+# 548W2TToHMrx/9hi+86VflWTchkhfjEIZ7yiEgu4CjLPBdQB7MIkF8nrL99I5/J3
+# VzZ6o5zMwknog31aFfxWOFGiz3H7dd0REknL/Z660AIMPxPoBXJoXtPxsTnRF7Xl
+# 8BMkq/ljAtt3rsj5Y78SWNZZt2gshn5neY7ciNZkMp2cmMnu8vmOV6BLX9s83eJv
+# XQIDAQABo4ICBzCCAgMwEAYJKwYBBAGCNxUBBAMCAQEwIwYJKwYBBAGCNxUCBBYE
+# FD5/t9H4RQ2OS6L3le2+UTn1epjUMB0GA1UdDgQWBBS2/jSOYo5ZvIsQ/mid+NU6
+# kEoG9TAZBgkrBgEEAYI3FAIEDB4KAFMAdQBiAEMAQTALBgNVHQ8EBAMCAYYwDwYD
+# VR0TAQH/BAUwAwEB/zAfBgNVHSMEGDAWgBTpige2QMZCpG7bI/DmWI4oi3py6jCB
+# lgYDVR0fBIGOMIGLMIGIoIGFoIGChjtmaWxlOi8vLy9ST09UQ0EvQ2VydEVucm9s
+# bC9Tb3V0aHNpZGUlMjBCYW5rJTIwUm9vdCUyMENBLmNybIZDaHR0cDovL2NhLnNv
+# dXRoc2lkZS5sb2NhbC9jZXJ0ZGF0YS9Tb3V0aHNpZGUlMjBCYW5rJTIwUm9vdCUy
+# MENBLmNybDCBtwYIKwYBBQUHAQEEgaowgacwTgYIKwYBBQUHMAKGQmZpbGU6Ly8v
+# L1JPT1RDQS9DZXJ0RW5yb2xsL1JPT1RDQV9Tb3V0aHNpZGUlMjBCYW5rJTIwUm9v
+# dCUyMENBLmNydDBVBggrBgEFBQcwAoZJaHR0cDovL2NhLnNvdXRoc2lkZS5sb2Nh
+# bC9jZXJ0ZGF0YS9ST09UQ0FTb3V0aHNpZGUlMjBCYW5rJTIwUm9vdCUyMENBLmNy
+# dDANBgkqhkiG9w0BAQsFAAOCAgEARB//ZToS8od2QLalr+VF4UcFf6z0MbOqIYpK
+# odqj0JIkDWuAwgIzk87/dDOHvAhJhA7evrzrsxmqT25bEmr0Np3yB8Idw6dtBV/u
+# d3p+d2W+tbJbgEWvSMjZ2X80U/QzisDgaXqd/QjzC6MRIDI3t0BfRPhX47AKNYHx
+# zTFL8CfKrB/NpTZvkRdaGma3hCFBW1JFQRNxXRx25xBfW7ID8+zPTq3eXklMuuqN
+# XI1jTeydmKPaHEJtJFGhjT/2loIXnB7h/mn6oUHGrW8tTp4eIuJHCZd6ie8nFOOl
+# 37L8mDI1g29hrFKtlB0L6uLgUJ9OPhHukBCSjGd1X86Xdng5528dfYn6wLxscbAb
+# Ai2GL0Y8LdE8xCiMInPH9hp2iI6wx1fj/ZrwyrI3L+m2t3H9kKKMY/QT95PBJ3mN
+# obN7oz/5dFfF3CFFSodlumIOapS8G87WH9Rx1RuFN2OTGHbOKI3BOfICTpE4w3NE
+# 2uR7kWAvn7Avk9dDsVoPOqaaK1CC7aU+Wj8OwvjuVmT+2dbPyQ8swDT+YckA2wNN
+# 4v1lbazNc/93WmYUQ7JW5ALel0/3dfJ83DRvXqwRyl5iLD3YRLzRkZxlJq/zrJ1K
+# kJLM6J6CHYnv9/TwP8G+Tvd0Nm3OzXUWSdjXIU3oeJrU5IkF93ZpPRmy5OwqVI9j
+# HzB/6PIwgggSMIIF+qADAgECAhNMAAC21bommFkGQCKSAAAAALbVMA0GCSqGSIb3
+# DQEBCwUAMFsxFTATBgoJkiaJk/IsZAEZFgVsb2NhbDEZMBcGCgmSJomT8ixkARkW
+# CXNvdXRoc2lkZTEnMCUGA1UEAxMeU291dGhzaWRlIEJhbmsgSW50ZXJtZWRpYXRl
+# IENBMB4XDTIzMDcwNjE1MTMxMloXDTI1MDMwMjE2NTY1NFowdTEVMBMGCgmSJomT
+# 8ixkARkWBWxvY2FsMRkwFwYKCZImiZPyLGQBGRYJc291dGhzaWRlMRcwFQYDVQQL
+# DA5CcmFuY2hlc19Vc2VyczEXMBUGA1UECwwOX0NvbXB1dGVyIERlcHQxDzANBgNV
+# BAMTBkFOREVSTjCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAN1EgYP5
+# SYIm/PBffDkC2lFB3//7ZZrNCV2xYvUA13P/bRmYs3ihBt2fSGMLVQl8HVLHKaWp
+# zyytVwBteG89qeKIiVnp4n9+Qh0KcCXsfuYtdkOkFO/kETA5t6PXSQnbJpWVPK0N
+# wGObnATPTONMM+WCgkDGhPgwLqzrWHLqcDCf2ft32XVkmfS4mx4VnlKsK7teGdX2
+# x4tJy7Hp+agDRgzLUV/0DXRtKiWAP2ksTIfpXujZjDzYDaOe4QDroQw2aCedMYC8
+# FRSNK00Xyi0WdDwfYjy9wTa3tGcCjW6JSBlf4H3If81CsIbWfKoli75Rwz1GC+pB
+# 7/SUl4JHaZ+1makCAwEAAaOCA7MwggOvMD0GCSsGAQQBgjcVBwQwMC4GJisGAQQB
+# gjcVCIL4vUGFgaNJgbGFBISYcoLCqgyBW4bfpyKDmr8AAgFlAgEAMBMGA1UdJQQM
+# MAoGCCsGAQUFBwMDMA4GA1UdDwEB/wQEAwIHgDAbBgkrBgEEAYI3FQoEDjAMMAoG
+# CCsGAQUFBwMDMB0GA1UdDgQWBBSUn8Xp/CmtlqRwTh+SYFxqAuO2YjAfBgNVHSME
+# GDAWgBS2/jSOYo5ZvIsQ/mid+NU6kEoG9TCCAYIGA1UdHwSCAXkwggF1MIIBcaCC
+# AW2gggFphoHKbGRhcDovLy9DTj1Tb3V0aHNpZGUlMjBCYW5rJTIwSW50ZXJtZWRp
+# YXRlJTIwQ0EsQ049Y2EsQ049Q0RQLENOPVB1YmxpYyUyMEtleSUyMFNlcnZpY2Vz
+# LENOPVNlcnZpY2VzLENOPUNvbmZpZ3VyYXRpb24sREM9c291dGhzaWRlLERDPWxv
+# Y2FsP2NlcnRpZmljYXRlUmV2b2NhdGlvbkxpc3Q/YmFzZT9vYmplY3RDbGFzcz1j
+# UkxEaXN0cmlidXRpb25Qb2ludIZNaHR0cDovL2NhLnNvdXRoc2lkZS5sb2NhbC9D
+# ZXJ0RW5yb2xsL1NvdXRoc2lkZSUyMEJhbmslMjBJbnRlcm1lZGlhdGUlMjBDQS5j
+# cmyGS2h0dHA6Ly9jYS5zb3V0aHNpZGUubG9jYWwvY2VydGRhdGEvU291dGhzaWRl
+# JTIwQmFuayUyMEludGVybWVkaWF0ZSUyMENBLmNybDCB2gYIKwYBBQUHAQEEgc0w
+# gcowgccGCCsGAQUFBzAChoG6bGRhcDovLy9DTj1Tb3V0aHNpZGUlMjBCYW5rJTIw
+# SW50ZXJtZWRpYXRlJTIwQ0EsQ049QUlBLENOPVB1YmxpYyUyMEtleSUyMFNlcnZp
+# Y2VzLENOPVNlcnZpY2VzLENOPUNvbmZpZ3VyYXRpb24sREM9c291dGhzaWRlLERD
+# PWxvY2FsP2NBQ2VydGlmaWNhdGU/YmFzZT9vYmplY3RDbGFzcz1jZXJ0aWZpY2F0
+# aW9uQXV0aG9yaXR5MDgGA1UdEQQxMC+gLQYKKwYBBAGCNxQCA6AfDB1uYXRoYW4u
+# YW5kZXJzb25Ac291dGhzaWRlLmNvbTBPBgkrBgEEAYI3GQIEQjBAoD4GCisGAQQB
+# gjcZAgGgMAQuUy0xLTUtMjEtMjA4ODM5NTMxNC00NDg0MTUyODAtMTUzMjMxMzA1
+# NS0zNTc3MTANBgkqhkiG9w0BAQsFAAOCAgEAQ/gxk5dB9X/+clz40a0y+idnw3eR
+# PfUS1uZHC2dxEh+vuP69xQNXaQ0JYZ+1yzoMsJq7i72oVy9l6Luqki2ToP4yP/3x
+# Lon7uCOjkeXNeyOn2+qaU78QSk9UIPp47GvzuPL2dn48OqknX4wVAYMQEAFGSsY1
+# 3KclOY7ih85F+OR7C33DzfF6RyeMe0EilmFstD/24mDNpsQIyaueDjCpj6EB2EF9
+# SFGjzCbqiEESDcWb2i9hbUyQJGZ19v8KXqlFqni7gRIJe/bNUG40ZcEhrg5I5HsR
+# +ae9GTO7bU8s3dKo4IRyR5KGBf9rGwHLBMCr6tZrE7Zs23wVIr+jE31OK7XSiwhU
+# WZ3Lvahwt/Jk8Y+PB4iQcaOfO5Q2qub6rKf7sdwuLy/rDeNKhP9JfOpyseljep+O
+# 7vXaiav3QGcR4IDKErPtHpSTwGApQuwJCwjW5fWjFOpZMM1UUB49zPCHR1+AGeK7
+# v7JhN40BlzKg6VdImCk8jN+8t9Pzv2ypKgu1CcTCni6sXHizQ9T5IW/1S51iBL89
+# C9fw5TDFsaRZO3V3vCjFaYinc30XKutCzA0I1ZUjugg5qynH4Rm2WnxTS9OTRmHj
+# Et/zQAEdAIIYGHEfKG0gE1WbN4V1l8lFfSg5gB48NeQEQKQuEFeS4TOJh6unydjr
+# 5F06yfuVhn8yCaIxggViMIIFXgIBATByMFsxFTATBgoJkiaJk/IsZAEZFgVsb2Nh
+# bDEZMBcGCgmSJomT8ixkARkWCXNvdXRoc2lkZTEnMCUGA1UEAxMeU291dGhzaWRl
+# IEJhbmsgSW50ZXJtZWRpYXRlIENBAhNMAAC21bommFkGQCKSAAAAALbVMAkGBSsO
+# AwIaBQCgeDAYBgorBgEEAYI3AgEMMQowCKACgAChAoAAMBkGCSqGSIb3DQEJAzEM
+# BgorBgEEAYI3AgEEMBwGCisGAQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMCMGCSqG
+# SIb3DQEJBDEWBBTwyTwcO/YhFDs40VS08OaMePUXHDANBgkqhkiG9w0BAQEFAASC
+# AQBIwbdT4xe2kTMdIcsJPFLNwrAlewHZxWLUu7GuuQYmzsG2Zk+MUVwNrq7F+mmu
+# F7bCSrwn3COzRUdYmnLe/ZIIPaQ/4k/hKY1lf2nPWHGQR5UGRK8ANiM22zEP7a5D
+# +4uhDCLzTREm4yNugJyGZqUlM3a07iucPGC2+Z72RXY3+ZVP1b/pRyF5JS9bDC0R
+# SXGRroyRlpKuq9FufTvkTlbqpXKewzQFTYFJqvyNWjI+K81Zk8wTj+Rs7ueBl0bi
+# +kIQhSvqy7UiAF+/5u04mzCyG9yAUsqgzzeul+LBpMsNpKbOIdOm2lhfSSY1PnM/
+# oEXZbdg4qSH16/9rPowlEnktoYIDSzCCA0cGCSqGSIb3DQEJBjGCAzgwggM0AgEB
+# MIGRMH0xCzAJBgNVBAYTAkdCMRswGQYDVQQIExJHcmVhdGVyIE1hbmNoZXN0ZXIx
+# EDAOBgNVBAcTB1NhbGZvcmQxGDAWBgNVBAoTD1NlY3RpZ28gTGltaXRlZDElMCMG
+# A1UEAxMcU2VjdGlnbyBSU0EgVGltZSBTdGFtcGluZyBDQQIQOUwl4XygbSeoZeI7
+# 2R0i1DANBglghkgBZQMEAgIFAKB5MBgGCSqGSIb3DQEJAzELBgkqhkiG9w0BBwEw
+# HAYJKoZIhvcNAQkFMQ8XDTI0MDIxMjE2NDQ0OFowPwYJKoZIhvcNAQkEMTIEMJGc
+# dzFd6r3s5KUhNh8uAkxP7Lrupt4UMPeES65EApSQQnOl+j8D86W2y/eWzb769DAN
+# BgkqhkiG9w0BAQEFAASCAgBx5lymJuJRkAinmtn7CyYkyuJehDY1GycvQP4+8G01
+# Z7VPON9wwVTEADU5sBTfGjYaukGbb/zvWwyuJlJl4AF0+MJKEOEoIzNwMrCjeqhf
+# JFW+xxurGkh3WlyR/j4ohevoox+5JGqBUM7dyx7XmIJNpy+Uuy2llQ05cdxzfVbp
+# 4ZEg2vsz2/do13BUxL8rinvClLtIO9gO6HvBoipjqZ9QlMWk7bbDhQ3CD1xUqenK
+# rV7HwpLYbQWvRZdKa1ZjxmI0HXMEz9Hax05nvqo02mM+rc31U7M8sMH3sHP4Nc2h
+# Y6kogA7Of46spaa3XttUygFtpYQMTZsNIkjp8F6HmFTmpVyCFAB8pTxI9WpwZ1nl
+# cP99tyZaDona//3cM4IqHw96p26lrYRYAG//8PETm9/3XjHGG6c71QO4z5N8XP/J
+# 1vTe9jny7UnrN77btycdW6zSbBdvqmmtCF80SMuxY+Bk+pZQ655kZ+hDSwig1Haz
+# s7HHfaKz7sONhk1RtOUDXJc4hmWL9zzpnSciijxDvhc9WV62yKgUWHUamZIgcroH
+# Yf5LOkYn5BZrsAOWl/WFLp4IU4us2ZgrRqgyq88as9ZhboGJVRjvFpuiTAdBDsE5
+# wU64zDZlhjRYEDfJ0qcCsin0bxvm6BRG7A8Hq4b02xEyp7ky/hczHF4SjtwQUeNm
+# ag==
 # SIG # End signature block
